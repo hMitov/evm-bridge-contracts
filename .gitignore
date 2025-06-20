@@ -1,14 +1,31 @@
-# Compiler files
+# Foundry build files
 cache/
 out/
 
-# Ignores development broadcast logs
-!/broadcast
-/broadcast/*/31337/
+# Foundry deployment logs
+/broadcast/
+!/broadcast/DeployBridgeFactoryBaseSepolia.s.sol/
+!/broadcast/DeployBridgeFactoryEthereumSepolia.s.sol/
+!/broadcast/GrantBridgeRoleBaseSepolia.s.sol/
+!/broadcast/GrantBridgeRoleEthereumSepolia.s.sol/
+/broadcast/**/31337/
 /broadcast/**/dry-run/
+**/run-latest.json
+
+# Node.js dependencies
+node_modules/
+
+# Environment variables
+.env
+.env.*
+
+# IDE and system files
+.idea/
+.vscode/
+.DS_Store
+
+# Logs
+*.log
 
 # Docs
 docs/
-
-# Dotenv file
-.env
