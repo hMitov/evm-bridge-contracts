@@ -21,8 +21,8 @@ contract DeployBridgeFactoryBaseSepoliaScript is EnvLoader {
     uint8 private originalTokenDecimals;
     uint8 private ethDecimals;
 
-    WERC20 public wrappedToken; // Wrapped USDC token
-    WERC20 public wrappedNativeToken; // Wrapped native ETH token
+    WERC20 public wrappedToken;
+    WERC20 public wrappedNativeToken;
     BridgeFactory public bridgeFactory;
 
     /// @notice Entry point for deployment script
