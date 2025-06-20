@@ -275,11 +275,11 @@ contract BridgeFactoryTest is Test {
     }
 
     function testLockTokenRevertsOnTransferFromReturningFalse() public {
-    MockRevertingTransferFromToken failToken = new MockRevertingTransferFromToken();
-    vm.prank(user);
-    vm.expectRevert(BridgeFactory.TokenTransferFailed.selector);
-    bridge.lockToken(address(failToken), 1 ether, 9999, 1);
-}
+        MockRevertingTransferFromToken failToken = new MockRevertingTransferFromToken();
+        vm.prank(user);
+        vm.expectRevert(BridgeFactory.TokenTransferFailed.selector);
+        bridge.lockToken(address(failToken), 1 ether, 9999, 1);
+    }
 
     function testFuzzLockToken(uint256 amount, uint256 targetChainId, uint256 nonceFuzz) public {
         vm.assume(amount > 0 && amount < initialBalance);
@@ -356,17 +356,17 @@ contract BridgeFactoryTest is Test {
         bridge.lockTokenWithPermit(address(token), 1 ether, 9999, 1, block.timestamp + 1, 0, bytes32(0), bytes32(0));
     }
 
-function testClaimWrappedWithSignatureRevertsEmptySignature() public {
-    vm.prank(user);
-    vm.expectRevert();
-    bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, sourceChainId, "");
-}
+    function testClaimWrappedWithSignatureRevertsEmptySignature() public {
+        vm.prank(user);
+        vm.expectRevert();
+        bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, sourceChainId, "");
+    }
 
-function testClaimWrappedWithSignatureRevertsTooShortSignature() public {
-    vm.prank(user);
-    vm.expectRevert();
-    bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, sourceChainId, hex"1234");
-}
+    function testClaimWrappedWithSignatureRevertsTooShortSignature() public {
+        vm.prank(user);
+        vm.expectRevert();
+        bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, sourceChainId, hex"1234");
+    }
 
     function testClaimWrappedWithSignatureRevertZeroUser() public {
         vm.prank(user);
