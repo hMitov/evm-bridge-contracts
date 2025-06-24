@@ -15,15 +15,29 @@ contract MockERC20 is ERC20Permit {
     }
 }
 
-contract MockRevertingTransferFromToken {
-    error TokenTransferFailed();
-
-    function transfer(address, uint256) external pure returns (bool) {
-        revert TokenTransferFailed();
+contract MockERC20ReturnFalse is IERC20 {
+    function totalSupply() external pure override returns (uint256) {
+        return 0;
     }
 
-    function transferFrom(address, address, uint256) external pure returns (bool) {
-        revert TokenTransferFailed();
+    function balanceOf(address) external pure override returns (uint256) {
+        return 0;
+    }
+
+    function transfer(address, uint256) external pure override returns (bool) {
+        return true;
+    }
+
+    function allowance(address, address) external pure override returns (uint256) {
+        return type(uint256).max;
+    }
+
+    function approve(address, uint256) external pure override returns (bool) {
+        return true;
+    }
+
+    function transferFrom(address, address, uint256) external pure override returns (bool) {
+        return false;
     }
 }
 
@@ -274,11 +288,12 @@ contract BridgeFactoryTest is Test {
         bridge.lockToken(address(token), 1 ether, 9999, 1);
     }
 
-    function testLockTokenRevertsOnTransferFromReturningFalse() public {
-        MockRevertingTransferFromToken failToken = new MockRevertingTransferFromToken();
+    function testLockTokenTransferFromReturnsFalse() public {
+        MockERC20ReturnFalse tokenFalse = new MockERC20ReturnFalse();
+
         vm.prank(user);
         vm.expectRevert(BridgeFactory.TokenTransferFailed.selector);
-        bridge.lockToken(address(failToken), 1 ether, 9999, 1);
+        bridge.lockToken(address(tokenFalse), 1 ether, 9999, 1);
     }
 
     function testFuzzLockToken(uint256 amount, uint256 targetChainId, uint256 nonceFuzz) public {
@@ -390,6 +405,27 @@ contract BridgeFactoryTest is Test {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.InvalidTargetChain.selector));
         bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, block.chainid, hex"");
+    }
+
+    function testClaimWrappedWithSignatureRevertNonceAlreadyUsed() public {
+        (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
+
+        vm.prank(deployer);
+        bridge.grantRelayerRole(relayerAddr);
+
+        uint256 amount = 1 ether;
+        bytes32 message =
+            keccak256(abi.encodePacked(user, address(token), amount, nonce, sourceChainId, address(bridge)));
+        bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        vm.prank(user);
+        bridge.claimWrappedWithSignature(user, address(token), amount, nonce, sourceChainId, signature);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ClaimAlreadyProcessed.selector));
+        bridge.claimWrappedWithSignature(user, address(token), amount, nonce, sourceChainId, signature);
     }
 
     function testClaimWrappedWithSignatureRevertInvalidSignerRole() public {
@@ -604,26 +640,10 @@ contract BridgeFactoryTest is Test {
         assertTrue(bridge.usedNonces(user, nonce, block.chainid));
     }
 
-    function testClaimOriginalWithSignatureRevertTokenTransferFailed() public {
-        MockRevertingTransferFromToken badToken = new MockRevertingTransferFromToken();
-
-        (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
-
-        vm.prank(deployer);
-        bridge.grantRelayerRole(relayerAddr);
-
-        uint256 amount = 1 ether;
-
-        bytes32 message =
-            keccak256(abi.encodePacked(user, address(badToken), amount, nonce, block.chainid, address(bridge)));
-        bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
-
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
-        bytes memory signature = abi.encodePacked(r, s, v);
-
+    function testClaimWrappedWithSignatureRevertECDSAInvalidSignatureLength() public {
         vm.prank(user);
-        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.TokenTransferFailed.selector));
-        bridge.claimOriginalWithSignature(user, address(badToken), amount, nonce, block.chainid, signature);
+        vm.expectRevert(abi.encodeWithSelector(ECDSAInvalidSignatureLength.selector, 4));
+        bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, sourceChainId, hex"aaaaaaaa");
     }
 
     function testClaimOriginalWithSignatureTokenSuccess() public {
