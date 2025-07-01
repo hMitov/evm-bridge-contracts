@@ -41,8 +41,11 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
     /// @notice Mapping from wrapped tokens back to their original tokens
     mapping(address => address) public originalTokens;
 
-    /// @notice Tracks used nonces scoped by user, nonce, and source chain to prevent replay
-    mapping(address => mapping(uint256 => mapping(uint256 => bool))) public usedNonces;
+    /// @notice Per-user nonce counter for generating unique operation identifiers
+    mapping(address => mapping(address => uint256)) public nonces;
+
+    /// @notice Tracks which nonces have been used for given user/token/nonce/originChain to prevent replay attacks
+    mapping(address => mapping(address => mapping(uint256 => mapping(uint256 => bool)))) public usedNonces;
 
     /// @notice Emitted when tokens are locked for bridging
     event TokenLocked(
@@ -83,6 +86,12 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
     /// @notice Reverts if the amount is zero in operations that require positive amounts
     error ZeroAmountNotAllowed();
 
+    /// @notice Reverts if the signature's expiration time (deadline) has passed, making the signature invalid for the operation
+    error SignatureExpired();
+
+    /// @notice Reverts if the original chain ID is zero
+    error ZeroOriginalChainNotAllowed();
+
     /// @notice Reverts if the target chain ID is zero
     error ZeroTargetChainNotAllowed();
 
@@ -119,11 +128,17 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
     /// @notice Reverts if wrapped token already registered when attempting to register again
     error WrappedTokenAlreadyRegistered();
 
-    /// @notice Reverts if target chain ID equals current chain ID (invalid bridging to same chain)
+    /// @notice Reverts if original chain ID equals current chain ID (invalid bridging to same chain)
+    error InvalidOriginalChain();
+
+    /// @notice Reverts if target chain ID not equals current chain ID when claim and equals current chain ID on lock
     error InvalidTargetChain();
 
     /// @notice Reverts if bridge factory has smaller balance than wanted amount
     error InsufficientBalance(uint256 balance, uint256 amount);
+
+    /// @notice Reverts when a claim attempts to use a nonce that has not been issued (i.e., nonce is greater than or equal to the current user nonce)
+    error NonceNotYetAvailable();
 
     /// @notice Role identifier for relayer accounts authorized to sign claims
     bytes32 public constant RELAYER_ROLE = keccak256("RELAYER_ROLE");
@@ -204,57 +219,53 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
 
     /// @notice Locks native ETH for bridging to another chain
     /// @param targetChainId ID of the destination chain
-    /// @param nonce Unique nonce to prevent replay attacks
     /// @dev Emits NativeLocked event
     /// @dev Reverts if paused, zero amount, zero or invalid target chain ID
-    function lockNative(uint256 targetChainId, uint256 nonce) external payable whenNotPaused {
+    function lockNative(uint256 targetChainId) external payable whenNotPaused {
         if (targetChainId == 0) revert ZeroTargetChainNotAllowed();
         if (msg.value == 0) revert ZeroAmountNotAllowed();
-        if (targetChainId == block.chainid) revert InvalidTargetChain();
+        if (targetChainId == currentChainId) revert InvalidTargetChain();
 
-        emit NativeLocked(msg.sender, msg.value, targetChainId, nonce);
+        uint256 userNonce = nonces[msg.sender][address(0)]++;
+
+        emit NativeLocked(msg.sender, msg.value, targetChainId, userNonce);
     }
 
     /// @notice Locks ERC20 tokens for bridging to another chain
     /// @param token ERC20 token address
     /// @param amount Amount of tokens to lock
     /// @param targetChainId ID of the destination chain
-    /// @param nonce Unique nonce to prevent replay attacks
     /// @dev Requires prior approval for token transfer
     /// @dev Emits TokenLocked event
-    /// @dev Reverts if paused, zero amount, zero address, zero or invalid target chain ID, or transfer failure
-    function lockToken(address token, uint256 amount, uint256 targetChainId, uint256 nonce)
-        external
-        whenNotPaused
-        nonReentrant
-    {
+    /// @dev Reverts if paused, zero amount, zero address, zero or invalid destination chain ID, or transfer failure
+    function lockToken(address token, uint256 amount, uint256 targetChainId) external whenNotPaused nonReentrant {
         if (token == address(0)) revert ZeroAddressNotAllowed();
         if (amount == 0) revert ZeroAmountNotAllowed();
         if (targetChainId == 0) revert ZeroTargetChainNotAllowed();
-        if (targetChainId == block.chainid) revert InvalidTargetChain();
+        if (targetChainId == currentChainId) revert InvalidTargetChain();
 
         bool success = IERC20(token).transferFrom(msg.sender, address(this), amount);
         if (!success) revert TokenTransferFailed();
 
-        emit TokenLocked(msg.sender, token, amount, targetChainId, nonce);
+        uint256 userNonce = nonces[msg.sender][token]++;
+
+        emit TokenLocked(msg.sender, token, amount, targetChainId, userNonce);
     }
 
     /// @notice Locks ERC20 tokens using permit to approve and transfer in one call
     /// @param token ERC20 token address supporting permit
     /// @param amount Amount of tokens to lock
     /// @param targetChainId ID of the destination chain
-    /// @param nonce Unique nonce to prevent replay attacks
     /// @param deadline Permit signature deadline
     /// @param v Signature v parameter
     /// @param r Signature r parameter
     /// @param s Signature s parameter
     /// @dev Emits TokenLocked event
-    /// @dev Reverts if paused, zero amount, zero address, zero target chain ID, or transfer failure
+    /// @dev Reverts if paused, zero amount, zero address, zero destination chain ID, or transfer failure
     function lockTokenWithPermit(
         address token,
         uint256 amount,
         uint256 targetChainId,
-        uint256 nonce,
         uint256 deadline,
         uint8 v,
         bytes32 r,
@@ -263,21 +274,24 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
         if (token == address(0)) revert ZeroAddressNotAllowed();
         if (amount == 0) revert ZeroAmountNotAllowed();
         if (targetChainId == 0) revert ZeroTargetChainNotAllowed();
-        if (targetChainId == block.chainid) revert InvalidTargetChain();
+        if (targetChainId == currentChainId) revert InvalidTargetChain();
 
         IERC20Permit(token).permit(msg.sender, address(this), amount, deadline, v, r, s);
         bool success = IERC20(token).transferFrom(msg.sender, address(this), amount);
         if (!success) revert TokenTransferFailed();
 
-        emit TokenLocked(msg.sender, token, amount, targetChainId, nonce);
+        uint256 userNonce = nonces[msg.sender][token]++;
+
+        emit TokenLocked(msg.sender, token, amount, targetChainId, userNonce);
     }
 
     /// @notice Claims wrapped tokens on this chain using relayer signature verification
     /// @param user Address receiving the tokens
     /// @param token Wrapped token address (address(0) if native ETH)
     /// @param amount Amount of tokens to claim
-    /// @param nonce Unique nonce from source chain operation
-    /// @param sourceChainId Chain ID where tokens were locked
+    /// @param nonce Unique nonce from orifinal chain operation
+    /// @param originalChainId Chain ID where tokens were locked
+    /// @param claimChainId Chain ID of the claimed tokens
     /// @param signature Relayer's signature approving the claim
     /// @dev Marks nonce as used to prevent replay
     /// @dev Emits NativeClaimed or TokenClaimed event
@@ -287,22 +301,30 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
         address token,
         uint256 amount,
         uint256 nonce,
-        uint256 sourceChainId,
+        uint256 originalChainId,
+        uint256 claimChainId,
+        uint256 deadline,
         bytes calldata signature
     ) external nonReentrant whenNotPaused {
         if (user == address(0)) revert ZeroAddressNotAllowed();
         if (amount == 0) revert ZeroAmountNotAllowed();
-        if (sourceChainId == 0) revert ZeroTargetChainNotAllowed();
-        if (sourceChainId == currentChainId) revert InvalidTargetChain();
-        if (usedNonces[user][nonce][sourceChainId]) revert ClaimAlreadyProcessed();
+        if (originalChainId == 0) revert ZeroOriginalChainNotAllowed();
+        if (claimChainId == 0) revert ZeroTargetChainNotAllowed();
+        if (originalChainId == currentChainId) revert InvalidOriginalChain();
+        if (claimChainId != currentChainId) revert InvalidTargetChain();
+        if (block.timestamp > deadline) revert SignatureExpired();
+        if (nonce >= nonces[user][token]) revert NonceNotYetAvailable();
+        if (usedNonces[user][token][nonce][originalChainId]) revert ClaimAlreadyProcessed();
 
-        bytes32 message = keccak256(abi.encodePacked(user, token, amount, nonce, sourceChainId, address(this)));
+        bytes32 message = keccak256(
+            abi.encodePacked(user, token, amount, nonce, originalChainId, claimChainId, address(this), deadline)
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
         address recovered = ECDSA.recover(signedMessage, signature);
 
         if (!hasRole(RELAYER_ROLE, recovered)) revert InvalidSignature();
 
-        usedNonces[user][nonce][sourceChainId] = true;
+        usedNonces[user][token][nonce][originalChainId] = true;
 
         if (token == address(0)) {
             address wrappedNative = wrappedTokens[address(0)];
@@ -323,8 +345,9 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
     /// @param user Address receiving the tokens
     /// @param token Original token address (address(0) if native ETH)
     /// @param amount Amount of tokens to claim
-    /// @param nonce Unique nonce from source chain operation
-    /// @param targetChainId Chain ID where tokens should be returned
+    /// @param nonce Unique nonce from chain where tokens were burned
+    /// @param burnChainId Chain ID where tokens were burned
+    /// @param claimChainId Chain ID where tokens should be returned
     /// @param signature Relayer's signature approving the claim
     /// @dev Marks nonce as used to prevent replay
     /// @dev Emits NativeReleased or TokenReleased event
@@ -334,22 +357,28 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
         address token,
         uint256 amount,
         uint256 nonce,
-        uint256 targetChainId,
+        uint256 burnChainId,
+        uint256 claimChainId,
+        uint256 deadline,
         bytes calldata signature
     ) external nonReentrant whenNotPaused {
         if (user == address(0)) revert ZeroAddressNotAllowed();
         if (amount == 0) revert ZeroAmountNotAllowed();
-        if (targetChainId == 0) revert ZeroTargetChainNotAllowed();
-        if (targetChainId != currentChainId) revert InvalidTargetChain();
-        if (usedNonces[user][nonce][targetChainId]) revert ClaimAlreadyProcessed();
+        if (burnChainId == 0) revert ZeroOriginalChainNotAllowed();
+        if (claimChainId == 0) revert ZeroTargetChainNotAllowed();
+        if (claimChainId != currentChainId) revert InvalidTargetChain();
+        if (block.timestamp > deadline) revert SignatureExpired();
+        if (nonce >= nonces[user][token]) revert NonceNotYetAvailable();
+        if (usedNonces[user][token][nonce][burnChainId]) revert ClaimAlreadyProcessed();
 
-        bytes32 message = keccak256(abi.encodePacked(user, token, amount, nonce, targetChainId, address(this)));
+        bytes32 message =
+            keccak256(abi.encodePacked(user, token, amount, nonce, burnChainId, claimChainId, address(this), deadline));
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
         address recovered = ECDSA.recover(signedMessage, signature);
 
         if (!hasRole(RELAYER_ROLE, recovered)) revert InvalidSignature();
 
-        usedNonces[user][nonce][targetChainId] = true;
+        usedNonces[user][token][nonce][burnChainId] = true;
 
         if (token == address(0)) {
             _safeTransferETH(user, amount);
@@ -366,25 +395,23 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
     /// @param originalToken Original token address expected on source chain
     /// @param amount Amount to burn
     /// @param originalChainId Chain ID where tokens will be returned
-    /// @param nonce Unique nonce to prevent replay
     /// @dev Emits TokenBurned event
     /// @dev Reverts if paused, zero addresses, zero amount, or token unregistered
-    function burnWrappedForReturn(
-        address wrappedToken,
-        address originalToken,
-        uint256 amount,
-        uint256 originalChainId,
-        uint256 nonce
-    ) external whenNotPaused {
+    function burnWrappedForReturn(address wrappedToken, address originalToken, uint256 amount, uint256 originalChainId)
+        external
+        whenNotPaused
+    {
         if (wrappedToken == address(0)) revert ZeroAddressNotAllowed();
         if (amount == 0) revert ZeroAmountNotAllowed();
         if (originalTokens[wrappedToken] != originalToken) revert UnregisteredWrappedToken();
         if (originalChainId == 0) revert ZeroTargetChainNotAllowed();
-        if (originalChainId == block.chainid) revert InvalidTargetChain();
+        if (originalChainId == currentChainId) revert InvalidTargetChain();
 
         IWERC20(wrappedToken).bridgeBurn(msg.sender, amount);
 
-        emit TokenBurned(msg.sender, wrappedToken, originalToken, amount, originalChainId, nonce);
+        uint256 userNonce = nonces[msg.sender][originalToken]++;
+
+        emit TokenBurned(msg.sender, wrappedToken, originalToken, amount, originalChainId, userNonce);
     }
 
     /// @notice Registers a new mapping between original and wrapped tokens

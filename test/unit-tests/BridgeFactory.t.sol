@@ -41,6 +41,18 @@ contract MockERC20ReturnFalse is IERC20 {
     }
 }
 
+contract MockERC20TransferFalse is ERC20 {
+    constructor() ERC20("MockFailToken", "MFT") {}
+
+    function transfer(address, uint256) public pure override returns (bool) {
+        return false;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
+
 contract RejectEthReceiver {
     fallback() external payable {
         revert("Reject ETH");
@@ -50,15 +62,17 @@ contract RejectEthReceiver {
 contract BridgeFactoryTest is Test {
     BridgeFactory bridge;
     MockERC20 token;
+    MockERC20 token1;
     WERC20 wrappedToken;
 
-    uint256 nonce = 5;
-    uint256 sourceChainId = 6;
+    uint256 nonce = 0;
+    uint256 originalChainId = 6;
     address deployer;
     address user = address(0x1234);
     address relayer = address(0x2222);
     address pauser = address(0x3333);
     address nonAdmin = address(0x5555);
+    uint256 deadline = block.timestamp + 1;
 
     uint256 constant initialBalance = 1_000 ether;
 
@@ -73,6 +87,9 @@ contract BridgeFactoryTest is Test {
 
         token = new MockERC20("Token", "USDC");
         token.mint(user, initialBalance);
+
+        token1 = new MockERC20("Token1", "USDC1");
+        token1.mint(user, initialBalance);
 
         wrappedToken = new WERC20("Wrapped Token", "wUSDC", 6);
         wrappedToken.grantRole(keccak256("BRIDGE_ROLE"), address(bridge));
@@ -208,84 +225,90 @@ contract BridgeFactoryTest is Test {
         vm.prank(user);
         vm.deal(user, 1 ether);
         vm.expectEmit(true, true, false, true);
-        emit BridgeFactory.NativeLocked(user, 1 ether, 9999, 1);
-        bridge.lockNative{value: 1 ether}(9999, 1);
+        emit BridgeFactory.NativeLocked(user, 1 ether, 9999, 0);
+        bridge.lockNative{value: 1 ether}(9999);
     }
 
     function testLockNativeRevertsZeroValue() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAmountNotAllowed.selector));
-        bridge.lockNative(9999, 1);
+        bridge.lockNative(9999);
     }
 
     function testLockNativeRevertsZeroTargetChain() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroTargetChainNotAllowed.selector));
-        bridge.lockNative(0, 1);
+        bridge.lockNative(0);
     }
 
     function testLockNativeRevertsInvalidTargetChain() public {
         vm.chainId(1234);
 
+        BridgeFactory bridgeNative = new BridgeFactory();
+
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.InvalidTargetChain.selector));
-        bridge.lockNative{value: 2 ether}(1234, 1);
+        bridgeNative.lockNative{value: 2 ether}(1234);
     }
 
-    function testFuzzLockNative(uint256 amount, uint256 targetChainId, uint256 nonceFuzz) public {
+    function testFuzzLockNative(uint256 amount, uint256 targetChainId) public {
         vm.assume(amount > 0 && amount < 10 ether);
         vm.assume(targetChainId != 0 && targetChainId != block.chainid);
 
         vm.deal(user, amount);
         vm.prank(user);
+        uint256 expectedNonce = bridge.nonces(user, address(0));
 
+        vm.prank(user);
         vm.expectEmit(true, true, false, true);
-        emit BridgeFactory.NativeLocked(user, amount, targetChainId, nonceFuzz);
+        emit BridgeFactory.NativeLocked(user, amount, targetChainId, expectedNonce);
 
-        bridge.lockNative{value: amount}(targetChainId, nonceFuzz);
+        bridge.lockNative{value: amount}(targetChainId);
     }
 
     function testLockTokenTransfersSuccess() public {
         vm.startPrank(user);
         token.approve(address(bridge), 1 ether);
         vm.expectEmit(true, true, false, true);
-        emit BridgeFactory.TokenLocked(user, address(token), 1 ether, 9999, 1);
-        bridge.lockToken(address(token), 1 ether, 9999, 1);
+        emit BridgeFactory.TokenLocked(user, address(token), 1 ether, 9999, 0);
+        bridge.lockToken(address(token), 1 ether, 9999);
         vm.stopPrank();
 
         assertEq(token.balanceOf(user), initialBalance - 1 ether);
         assertEq(token.balanceOf(address(bridge)), 1 ether);
     }
 
-    function testLockTokenRevertsZeroAmount() public {
-        vm.prank(user);
-        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAmountNotAllowed.selector));
-        bridge.lockToken(address(token), 0, 0, 1);
-    }
-
     function testLockTokenRevertsZeroTokenAddress() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAddressNotAllowed.selector));
-        bridge.lockToken(address(0), 1 ether, 0, 1);
+        bridge.lockToken(address(0), 1 ether, 0);
+    }
+
+    function testLockTokenRevertsZeroAmount() public {
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAmountNotAllowed.selector));
+        bridge.lockToken(address(token), 0, 0);
     }
 
     function testLockTokenRevertsZeroTargetChain() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroTargetChainNotAllowed.selector));
-        bridge.lockToken(address(token), 1 ether, 0, 1);
+        bridge.lockToken(address(token), 1 ether, 0);
     }
 
     function testLockTokenRevertsInvalidTargetChain() public {
+        vm.chainId(9999);
+        BridgeFactory bridgeNative = new BridgeFactory();
+
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.InvalidTargetChain.selector));
-        vm.chainId(9999);
-        bridge.lockToken(address(token), 1 ether, 9999, 1);
+        bridgeNative.lockToken(address(token), 1 ether, 9999);
     }
 
     function testLockTokenRevertsIfNotApproved() public {
         vm.prank(user);
         vm.expectRevert();
-        bridge.lockToken(address(token), 1 ether, 9999, 1);
+        bridge.lockToken(address(token), 1 ether, 9999);
     }
 
     function testLockTokenTransferFromReturnsFalse() public {
@@ -293,20 +316,21 @@ contract BridgeFactoryTest is Test {
 
         vm.prank(user);
         vm.expectRevert(BridgeFactory.TokenTransferFailed.selector);
-        bridge.lockToken(address(tokenFalse), 1 ether, 9999, 1);
+        bridge.lockToken(address(tokenFalse), 1 ether, 9999);
     }
 
-    function testFuzzLockToken(uint256 amount, uint256 targetChainId, uint256 nonceFuzz) public {
+    function testFuzzLockToken(uint256 amount, uint256 targetChainId) public {
         vm.assume(amount > 0 && amount < initialBalance);
         vm.assume(targetChainId != 0 && targetChainId != block.chainid);
 
         vm.startPrank(user);
+        uint256 expectedNonce = bridge.nonces(user, address(token));
         token.approve(address(bridge), amount);
 
         vm.expectEmit(true, true, false, true);
-        emit BridgeFactory.TokenLocked(user, address(token), amount, targetChainId, nonceFuzz);
+        emit BridgeFactory.TokenLocked(user, address(token), amount, targetChainId, expectedNonce);
 
-        bridge.lockToken(address(token), amount, targetChainId, nonceFuzz);
+        bridge.lockToken(address(token), amount, targetChainId);
         vm.stopPrank();
 
         assertEq(token.balanceOf(user), initialBalance - amount);
@@ -321,7 +345,6 @@ contract BridgeFactoryTest is Test {
 
         vm.startPrank(user1);
 
-        uint256 deadline = block.timestamp + 1 hours;
         bytes32 DOMAIN_SEPARATOR = tokenWithPermit.DOMAIN_SEPARATOR();
         uint256 nonce1 = tokenWithPermit.nonces(user1);
         bytes32 structHash = keccak256(
@@ -338,7 +361,7 @@ contract BridgeFactoryTest is Test {
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(userPrivateKey, digest);
 
-        bridge.lockTokenWithPermit(address(tokenWithPermit), 1 ether, 9999, 1, deadline, v, r, s);
+        bridge.lockTokenWithPermit(address(tokenWithPermit), 1 ether, 9999, deadline, v, r, s);
 
         vm.stopPrank();
 
@@ -349,90 +372,182 @@ contract BridgeFactoryTest is Test {
     function testLockTokenWithPermitRevertsZeroAddress() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAddressNotAllowed.selector));
-        bridge.lockTokenWithPermit(address(0), 1 ether, 9999, 1, block.timestamp + 1, 0, bytes32(0), bytes32(0));
+        bridge.lockTokenWithPermit(address(0), 1 ether, 9999, block.timestamp + 1, 0, bytes32(0), bytes32(0));
     }
 
     function testLockTokenWithPermitRevertsZeroAmount() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAmountNotAllowed.selector));
-        bridge.lockTokenWithPermit(address(token), 0, 9999, 1, block.timestamp + 1, 0, bytes32(0), bytes32(0));
+        bridge.lockTokenWithPermit(address(token), 0, 9999, block.timestamp + 1, 0, bytes32(0), bytes32(0));
     }
 
     function testLockTokenWithPermitRevertsZeroTargetChain() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroTargetChainNotAllowed.selector));
-        bridge.lockTokenWithPermit(address(token), 1 ether, 0, 1, block.timestamp + 1, 0, bytes32(0), bytes32(0));
+        bridge.lockTokenWithPermit(address(token), 1 ether, 0, block.timestamp + 1, 0, bytes32(0), bytes32(0));
     }
 
     function testLockTokenWithPermitRevertsInvalidTargetChain() public {
+        vm.chainId(9999);
+
+        BridgeFactory bridgeToken = new BridgeFactory();
+
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.InvalidTargetChain.selector));
-        vm.chainId(9999);
-        bridge.lockTokenWithPermit(address(token), 1 ether, 9999, 1, block.timestamp + 1, 0, bytes32(0), bytes32(0));
+        bridgeToken.lockTokenWithPermit(address(token), 1 ether, 9999, block.timestamp + 1, 0, bytes32(0), bytes32(0));
     }
 
     function testClaimWrappedWithSignatureRevertsEmptySignature() public {
+        uint256 claimChainId = 5;
+
         vm.prank(user);
         vm.expectRevert();
-        bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, sourceChainId, "");
+        bridge.claimWrappedWithSignature(
+            user, address(token), 1 ether, nonce, originalChainId, claimChainId, deadline, ""
+        );
     }
 
     function testClaimWrappedWithSignatureRevertsTooShortSignature() public {
+        uint256 claimChainId = 5;
+
         vm.prank(user);
         vm.expectRevert();
-        bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, sourceChainId, hex"1234");
+        bridge.claimWrappedWithSignature(
+            user, address(token), 1 ether, nonce, originalChainId, claimChainId, deadline, hex"1234"
+        );
     }
 
     function testClaimWrappedWithSignatureRevertZeroUser() public {
+        uint256 claimChainId = 5;
+
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAddressNotAllowed.selector));
-        bridge.claimWrappedWithSignature(address(0), address(token), 1 ether, nonce, sourceChainId, hex"");
+        bridge.claimWrappedWithSignature(
+            address(0), address(token), 1 ether, nonce, originalChainId, claimChainId, deadline, hex""
+        );
     }
 
     function testClaimWrappedWithSignatureRevertZeroAmount() public {
+        uint256 claimChainId = 5;
+
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAmountNotAllowed.selector));
-        bridge.claimWrappedWithSignature(user, address(token), 0, nonce, sourceChainId, hex"");
+        bridge.claimWrappedWithSignature(user, address(token), 0, nonce, originalChainId, claimChainId, deadline, hex"");
     }
 
-    function testClaimWrappedWithSignatureRevertZeroSourceChain() public {
+    function testClaimWrappedWithSignatureRevertZeroOriginalChain() public {
+        uint256 claimChainId = 5;
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroOriginalChainNotAllowed.selector));
+        bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, 0, claimChainId, deadline, hex"");
+    }
+
+    function testClaimWrappedWithSignatureRevertZeroClaimChain() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroTargetChainNotAllowed.selector));
-        bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, 0, hex"");
+        bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, 3, 0, deadline, hex"");
     }
 
-    function testClaimWrappedWithSignatureRevertSourceChainIsCurrentChain() public {
+    function testClaimWrappedWithSignatureRevertOriginalChainIsCurrentChain() public {
+        uint256 claimChainId = 5;
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.InvalidOriginalChain.selector));
+        bridge.claimWrappedWithSignature(
+            user, address(token), 1 ether, nonce, block.chainid, claimChainId, deadline, hex""
+        );
+    }
+
+    function testClaimWrappedWithSignatureRevertClaimChainIsNotCurrentChain() public {
+        uint256 claimChainId = 5;
+
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.InvalidTargetChain.selector));
-        bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, block.chainid, hex"");
+        bridge.claimWrappedWithSignature(
+            user, address(token), 1 ether, nonce, originalChainId, claimChainId, deadline, hex""
+        );
     }
 
-    function testClaimWrappedWithSignatureRevertNonceAlreadyUsed() public {
+    function testClaimWrappedWithSignatureRevertSignatureExpired() public {
+        uint256 claimChainId = 9999;
+        vm.chainId(claimChainId);
+
+        BridgeFactory bridge1 = new BridgeFactory();
+
+        uint256 currentTime = block.timestamp;
+
+        vm.warp(currentTime + 1000);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.SignatureExpired.selector));
+
+        bridge1.claimWrappedWithSignature(
+            user, address(token), 1 ether, nonce, originalChainId, claimChainId, currentTime, hex""
+        );
+    }
+
+    function testClaimWrappedWithSignatureRevertNonceNotYetAvailable() public {
         (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
 
         vm.prank(deployer);
         bridge.grantRelayerRole(relayerAddr);
 
         uint256 amount = 1 ether;
-        bytes32 message =
-            keccak256(abi.encodePacked(user, address(token), amount, nonce, sourceChainId, address(bridge)));
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                user, address(token), amount, nonce, originalChainId, block.chainid, address(bridge), deadline
+            )
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
         bytes memory signature = abi.encodePacked(r, s, v);
 
         vm.prank(user);
-        bridge.claimWrappedWithSignature(user, address(token), amount, nonce, sourceChainId, signature);
+        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.NonceNotYetAvailable.selector));
+        bridge.claimWrappedWithSignature(
+            user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
+    }
+
+    function testClaimWrappedWithSignatureRevertNonceAlreadyUsed() public {
+        testLockTokenTransfersSuccess();
+        (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
+
+        vm.prank(deployer);
+        bridge.grantRelayerRole(relayerAddr);
+
+        uint256 amount = 1 ether;
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                user, address(token), amount, nonce, originalChainId, block.chainid, address(bridge), deadline
+            )
+        );
+        bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        vm.prank(user);
+        bridge.claimWrappedWithSignature(
+            user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ClaimAlreadyProcessed.selector));
-        bridge.claimWrappedWithSignature(user, address(token), amount, nonce, sourceChainId, signature);
+        bridge.claimWrappedWithSignature(
+            user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
     }
 
     function testClaimWrappedWithSignatureRevertInvalidSignerRole() public {
+        testLockTokenTransfersSuccess();
         uint256 fakeRelayerKey = 0x1234;
 
         uint256 amount = 1 ether;
-        bytes32 message = keccak256(abi.encode(user, address(token), amount, nonce, sourceChainId, address(bridge)));
+
+        bytes32 message = keccak256(
+            abi.encode(user, address(token), amount, nonce, originalChainId, block.chainid, address(bridge), deadline)
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(fakeRelayerKey, signedMessage);
@@ -440,21 +555,31 @@ contract BridgeFactoryTest is Test {
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.InvalidSignature.selector));
-        bridge.claimWrappedWithSignature(user, address(token), amount, nonce, sourceChainId, signature);
+        bridge.claimWrappedWithSignature(
+            user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
     }
 
     function testClaimWrappedWithSignatureTokenRevertInvalidWrappedToken() public {
-        address unregisteredToken = address(5);
+        vm.startPrank(user);
+        token1.approve(address(bridge), 1 ether);
+        vm.expectEmit(true, true, false, true);
+        emit BridgeFactory.TokenLocked(user, address(token1), 1 ether, 9999, 0);
+        bridge.lockToken(address(token1), 1 ether, 9999);
+        vm.stopPrank();
 
-        uint256 relayerPrivateKey = 0xA22CE;
-        address relayerAddr = vm.addr(relayerPrivateKey);
+        (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
 
         vm.prank(deployer);
         bridge.grantRelayerRole(relayerAddr);
 
         uint256 amount = 1 ether;
-        bytes32 message =
-            keccak256(abi.encodePacked(user, unregisteredToken, amount, nonce, sourceChainId, address(bridge)));
+
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                user, address(token1), amount, nonce, originalChainId, block.chainid, address(bridge), deadline
+            )
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
@@ -463,10 +588,13 @@ contract BridgeFactoryTest is Test {
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.UnregisteredWrappedToken.selector));
-        bridge.claimWrappedWithSignature(user, unregisteredToken, amount, nonce, sourceChainId, signature);
+        bridge.claimWrappedWithSignature(
+            user, address(token1), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
     }
 
     function testClaimWrappedWithSignatureRevertUnregisteredWrappedTokenNative() public {
+        testLockNativeSuccess();
         (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
 
         vm.prank(deployer);
@@ -475,7 +603,11 @@ contract BridgeFactoryTest is Test {
         uint256 amount = 1 ether;
         address nativeToken = address(0);
 
-        bytes32 message = keccak256(abi.encodePacked(user, nativeToken, amount, nonce, sourceChainId, address(bridge)));
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                user, nativeToken, amount, nonce, originalChainId, block.chainid, address(bridge), deadline
+            )
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
@@ -483,10 +615,13 @@ contract BridgeFactoryTest is Test {
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.UnregisteredWrappedToken.selector));
-        bridge.claimWrappedWithSignature(user, nativeToken, amount, nonce, sourceChainId, signature);
+        bridge.claimWrappedWithSignature(
+            user, nativeToken, amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
     }
 
     function testClaimWrappedWithSignatureRevertUnregisteredWrappedToken() public {
+        testLockNativeSuccess();
         (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
 
         vm.prank(deployer);
@@ -495,7 +630,11 @@ contract BridgeFactoryTest is Test {
         uint256 amount = 1 ether;
         address nativeToken = address(0);
 
-        bytes32 message = keccak256(abi.encodePacked(user, nativeToken, amount, nonce, sourceChainId, address(bridge)));
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                user, nativeToken, amount, nonce, originalChainId, block.chainid, address(bridge), deadline
+            )
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
@@ -503,14 +642,16 @@ contract BridgeFactoryTest is Test {
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.UnregisteredWrappedToken.selector));
-        bridge.claimWrappedWithSignature(user, nativeToken, amount, nonce, sourceChainId, signature);
+        bridge.claimWrappedWithSignature(
+            user, nativeToken, amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
     }
 
     function testClaimWrappedWithSignatureWhenNativeSuccess() public {
+        testLockNativeSuccess();
         uint256 amount = 1 ether;
         address tokenZero = address(0);
-        uint256 relayerPrivateKey = 0xa0184aea8af0b8c660e4a5a58553ec5c18d670251bd4df58e14bd9308b2e5484;
-        address relayer1 = vm.addr(relayerPrivateKey);
+        (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
 
         vm.startPrank(deployer);
 
@@ -520,60 +661,100 @@ contract BridgeFactoryTest is Test {
 
         bridge.registerWrappedToken(tokenZero, address(newWrappedNative));
 
-        bridge.grantRelayerRole(relayer1);
+        bridge.grantRelayerRole(relayerAddr);
 
         vm.stopPrank();
 
         vm.deal(address(bridge), amount);
 
-        bytes32 message = keccak256(abi.encodePacked(user, tokenZero, amount, nonce, sourceChainId, address(bridge)));
+        bytes32 message = keccak256(
+            abi.encodePacked(user, tokenZero, amount, nonce, originalChainId, block.chainid, address(bridge), deadline)
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
 
         vm.prank(user);
-        bridge.claimWrappedWithSignature(user, tokenZero, amount, nonce, sourceChainId, abi.encodePacked(r, s, v));
+        bridge.claimWrappedWithSignature(
+            user, tokenZero, amount, nonce, originalChainId, block.chainid, deadline, abi.encodePacked(r, s, v)
+        );
 
-        bool used = bridge.usedNonces(user, nonce, sourceChainId);
+        bool used = bridge.usedNonces(user, tokenZero, nonce, originalChainId);
         assertTrue(used);
     }
 
     function testClaimWrappedWithSignatureFailsInvalidSignature() public {
+        testLockNativeSuccess();
         uint256 amount = 1 ether;
-        address token1 = address(0);
+        address zeroToken = address(0);
 
         bytes memory invalidSig = hex"aaaaaaaa";
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(ECDSAInvalidSignatureLength.selector, 4));
-        bridge.claimWrappedWithSignature(user, token1, amount, nonce, sourceChainId, invalidSig);
+        bridge.claimWrappedWithSignature(
+            user, zeroToken, amount, nonce, originalChainId, block.chainid, deadline, invalidSig
+        );
     }
 
     function testClaimOriginalWithSignatureRevertZeroUser() public {
+        testLockTokenTransfersSuccess();
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAddressNotAllowed.selector));
-        bridge.claimOriginalWithSignature(address(0), address(token), 1 ether, nonce, sourceChainId, hex"");
+        bridge.claimOriginalWithSignature(
+            address(0), address(token), 1 ether, nonce, originalChainId, block.chainid, deadline, hex""
+        );
     }
 
     function testClaimOriginalWithSignatureRevertZeroAmount() public {
+        testLockTokenTransfersSuccess();
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAmountNotAllowed.selector));
-        bridge.claimOriginalWithSignature(user, address(token), 0, nonce, sourceChainId, hex"");
+        bridge.claimOriginalWithSignature(
+            user, address(token), 0, nonce, originalChainId, block.chainid, deadline, hex""
+        );
     }
 
-    function testClaimOriginalWithSignatureRevertZeroTargetChain() public {
+    function testClaimOriginalWithSignatureRevertZeroBurnChain() public {
+        testLockTokenTransfersSuccess();
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroOriginalChainNotAllowed.selector));
+        bridge.claimOriginalWithSignature(user, address(token), 1 ether, nonce, 0, block.chainid, deadline, hex"");
+    }
+
+    function testClaimOriginalWithSignatureRevertZeroClaimChain() public {
+        testLockTokenTransfersSuccess();
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroTargetChainNotAllowed.selector));
-        bridge.claimOriginalWithSignature(user, address(token), 1 ether, nonce, 0, hex"");
+        bridge.claimOriginalWithSignature(user, address(token), 1 ether, nonce, originalChainId, 0, deadline, hex"");
     }
 
-    function testClaimOriginalWithSignatureRevertTargetChainIsCurrentChain() public {
+    function testClaimOriginalWithSignatureRevertTargetChainIsNotCurrentChain() public {
+        testLockTokenTransfersSuccess();
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.InvalidTargetChain.selector));
-        bridge.claimOriginalWithSignature(user, address(token), 1 ether, nonce, 9999, hex"");
+        bridge.claimOriginalWithSignature(user, address(token), 1 ether, nonce, originalChainId, 5, deadline, hex"");
+    }
+
+    function testClaimOriginalWithSignatureRevertSignatureExpired() public {
+        testLockTokenTransfersSuccess();
+        uint256 claimChainId = 9999;
+        vm.chainId(claimChainId);
+
+        BridgeFactory bridge1 = new BridgeFactory();
+
+        uint256 currentTime = block.timestamp;
+
+        vm.warp(currentTime + 1000);
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.SignatureExpired.selector));
+        bridge1.claimOriginalWithSignature(
+            user, address(token), 1 ether, nonce, originalChainId, claimChainId, currentTime, hex""
+        );
     }
 
     function testClaimOriginalWithSignatureRevertNonceAlreadyUsed() public {
+        testLockTokenTransfersSuccess();
         (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
 
         vm.prank(deployer);
@@ -581,8 +762,11 @@ contract BridgeFactoryTest is Test {
 
         uint256 amount = 1 ether;
 
-        bytes32 message =
-            keccak256(abi.encodePacked(user, address(token), amount, nonce, block.chainid, address(bridge)));
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                user, address(token), amount, nonce, originalChainId, block.chainid, address(bridge), deadline
+            )
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
@@ -591,19 +775,53 @@ contract BridgeFactoryTest is Test {
         token.mint(address(bridge), amount);
 
         vm.prank(user);
-        bridge.claimOriginalWithSignature(user, address(token), amount, nonce, block.chainid, signature);
+        bridge.claimOriginalWithSignature(
+            user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ClaimAlreadyProcessed.selector));
-        bridge.claimOriginalWithSignature(user, address(token), amount, nonce, block.chainid, signature);
+        bridge.claimOriginalWithSignature(
+            user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
+    }
+
+    function testClaimOriginalWithSignatureRevertNonceNotYetAvailable() public {
+        (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
+
+        vm.prank(deployer);
+        bridge.grantRelayerRole(relayerAddr);
+
+        uint256 amount = 1 ether;
+
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                user, address(token), amount, nonce, originalChainId, block.chainid, address(bridge), deadline
+            )
+        );
+        bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        token.mint(address(bridge), amount);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.NonceNotYetAvailable.selector));
+        bridge.claimOriginalWithSignature(
+            user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
     }
 
     function testClaimOriginalWithSignatureRevertInvalidSignerRole() public {
+        testLockTokenTransfersSuccess();
         (, uint256 fakePrivateKey) = makeAddrAndKey("faker");
-
         uint256 amount = 1 ether;
-        bytes32 message =
-            keccak256(abi.encodePacked(user, address(token), amount, nonce, block.chainid, address(bridge)));
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                user, address(token), amount, nonce, originalChainId, block.chainid, address(bridge), deadline
+            )
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(fakePrivateKey, signedMessage);
@@ -611,10 +829,13 @@ contract BridgeFactoryTest is Test {
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.InvalidSignature.selector));
-        bridge.claimOriginalWithSignature(user, address(token), amount, nonce, block.chainid, signature);
+        bridge.claimOriginalWithSignature(
+            user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
     }
 
     function testClaimOriginalWithSignatureNativeSuccess() public {
+        testLockNativeSuccess();
         (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
 
         vm.prank(deployer);
@@ -625,7 +846,9 @@ contract BridgeFactoryTest is Test {
 
         vm.deal(address(bridge), amount);
 
-        bytes32 message = keccak256(abi.encodePacked(user, tokenZero, amount, nonce, block.chainid, address(bridge)));
+        bytes32 message = keccak256(
+            abi.encodePacked(user, tokenZero, amount, nonce, originalChainId, block.chainid, address(bridge), deadline)
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
@@ -635,57 +858,81 @@ contract BridgeFactoryTest is Test {
         vm.expectEmit(true, true, false, true);
         emit BridgeFactory.NativeReleased(user, amount);
 
-        bridge.claimOriginalWithSignature(user, tokenZero, amount, nonce, block.chainid, signature);
+        bridge.claimOriginalWithSignature(
+            user, tokenZero, amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
 
-        assertTrue(bridge.usedNonces(user, nonce, block.chainid));
+        assertTrue(bridge.usedNonces(user, tokenZero, nonce, originalChainId));
     }
 
     function testClaimWrappedWithSignatureRevertECDSAInvalidSignatureLength() public {
+        testLockTokenTransfersSuccess();
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(ECDSAInvalidSignatureLength.selector, 4));
-        bridge.claimWrappedWithSignature(user, address(token), 1 ether, nonce, sourceChainId, hex"aaaaaaaa");
+        bridge.claimWrappedWithSignature(
+            user, address(token), 1 ether, nonce, originalChainId, block.chainid, deadline, hex"aaaaaaaa"
+        );
     }
 
     function testClaimOriginalWithSignatureTokenSuccess() public {
-        MockERC20 goodToken = new MockERC20("GoodToken", "GTK");
-        goodToken.mint(address(bridge), 10 ether);
+        uint256 amount = 1 ether;
+        uint256 balanceBefore = token1.balanceOf(user);
+
+        vm.startPrank(user);
+        token1.approve(address(bridge), amount);
+        vm.expectEmit(true, true, false, true);
+        emit BridgeFactory.TokenLocked(user, address(token1), amount, 9999, 0);
+        bridge.lockToken(address(token1), amount, 9999);
+        vm.stopPrank();
+
+        uint256 balanceAfterLock = token1.balanceOf(user);
+        assertEq(balanceBefore - balanceAfterLock, amount);
 
         (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
-
         vm.prank(deployer);
         bridge.grantRelayerRole(relayerAddr);
 
-        uint256 amount = 1 ether;
-
-        bytes32 message =
-            keccak256(abi.encodePacked(user, address(goodToken), amount, nonce, block.chainid, address(bridge)));
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                user, address(token1), amount, nonce, originalChainId, block.chainid, address(bridge), deadline
+            )
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
-
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
         bytes memory signature = abi.encodePacked(r, s, v);
 
         vm.prank(user);
         vm.expectEmit(true, true, false, true);
-        emit BridgeFactory.TokenReleased(user, address(goodToken), amount);
+        emit BridgeFactory.TokenReleased(user, address(token1), amount);
+        bridge.claimOriginalWithSignature(
+            user, address(token1), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
 
-        bridge.claimOriginalWithSignature(user, address(goodToken), amount, nonce, block.chainid, signature);
+        uint256 balanceAfterClaim = token1.balanceOf(user);
+        assertEq(balanceAfterClaim, balanceBefore);
 
-        assertEq(goodToken.balanceOf(user), amount);
-
-        bool used = bridge.usedNonces(user, nonce, block.chainid);
+        bool used = bridge.usedNonces(user, address(token1), nonce, originalChainId);
         assertTrue(used);
     }
 
     function testClaimOriginalWithSignatureEthTransferFails() public {
         RejectEthReceiver badReceiver = new RejectEthReceiver();
+        vm.prank(address(badReceiver));
+        vm.deal(address(badReceiver), 1 ether);
+        vm.expectEmit(true, true, false, true);
+        emit BridgeFactory.NativeLocked(address(badReceiver), 1 ether, 9999, 0);
+        bridge.lockNative{value: 1 ether}(9999);
 
         (address relayerAddr, uint256 relayerKey) = makeAddrAndKey("relayer");
         vm.prank(deployer);
         bridge.grantRelayerRole(relayerAddr);
 
         uint256 amount = 1 ether;
-        bytes32 message =
-            keccak256(abi.encodePacked(badReceiver, address(0), amount, nonce, block.chainid, address(bridge)));
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                badReceiver, address(0), amount, nonce, originalChainId, block.chainid, address(bridge), deadline
+            )
+        );
         bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerKey, signedMessage);
@@ -693,40 +940,42 @@ contract BridgeFactoryTest is Test {
 
         vm.prank(address(badReceiver));
         vm.expectRevert(BridgeFactory.EthTransferFailed.selector);
-        bridge.claimOriginalWithSignature(address(badReceiver), address(0), amount, nonce, block.chainid, signature);
+        bridge.claimOriginalWithSignature(
+            address(badReceiver), address(0), amount, nonce, originalChainId, block.chainid, deadline, signature
+        );
     }
 
     function testBurnWrappedForReturnRevertZeroAddress() public {
         vm.startPrank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAddressNotAllowed.selector));
-        bridge.burnWrappedForReturn(address(0), address(token), 1 ether, 9999, 1);
+        bridge.burnWrappedForReturn(address(0), address(token), 1 ether, originalChainId);
         vm.stopPrank();
     }
 
     function testBurnWrappedForReturnRevertZeroAmount() public {
         vm.startPrank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroAmountNotAllowed.selector));
-        bridge.burnWrappedForReturn(address(wrappedToken), address(token), 0, 9999, 1);
+        bridge.burnWrappedForReturn(address(wrappedToken), address(token), 0, originalChainId);
         vm.stopPrank();
     }
 
     function testBurnWrappedForReturnRevertUnregisteredWrappedToken() public {
         vm.startPrank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.UnregisteredWrappedToken.selector));
-        bridge.burnWrappedForReturn(address(0x9999), address(token), 1 ether, 9999, 1);
+        bridge.burnWrappedForReturn(address(0x9999), address(token), 1 ether, originalChainId);
         vm.stopPrank();
     }
 
     function testBurnWrappedForReturnRevertZeroOriginalChainId() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ZeroTargetChainNotAllowed.selector));
-        bridge.burnWrappedForReturn(address(wrappedToken), address(token), 1 ether, 0, nonce);
+        bridge.burnWrappedForReturn(address(wrappedToken), address(token), 1 ether, 0);
     }
 
     function testBurnWrappedForReturnRevertOriginalChainIsCurrentChain() public {
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.InvalidTargetChain.selector));
-        bridge.burnWrappedForReturn(address(wrappedToken), address(token), 1 ether, block.chainid, nonce);
+        bridge.burnWrappedForReturn(address(wrappedToken), address(token), 1 ether, block.chainid);
     }
 
     function testBurnWrappedForReturnEmitsEvent() public {
@@ -738,8 +987,8 @@ contract BridgeFactoryTest is Test {
 
         vm.startPrank(user);
         vm.expectEmit(true, true, true, true);
-        emit BridgeFactory.TokenBurned(user, address(wrappedToken), address(token), 10 ether, 9999, nonce);
-        bridge.burnWrappedForReturn(address(wrappedToken), address(token), 10 ether, 9999, nonce);
+        emit BridgeFactory.TokenBurned(user, address(wrappedToken), address(token), 10 ether, originalChainId, 0);
+        bridge.burnWrappedForReturn(address(wrappedToken), address(token), 10 ether, originalChainId);
         vm.stopPrank();
 
         assertEq(wrappedToken.balanceOf(user), 0);
@@ -796,5 +1045,251 @@ contract BridgeFactoryTest is Test {
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.DirectEthTransfersNotSupported.selector));
         (bool success,) = address(bridge).call{value: 1 ether}(abi.encodePacked(bytes4(0x12345678)));
         assertTrue(success);
+    }
+
+    function testReplayAttackDifferentAddressesRevertInvalidSignature() public {
+        vm.startPrank(deployer);
+        vm.chainId(1);
+        BridgeFactory bridgeChain1 = new BridgeFactory();
+
+        vm.chainId(2);
+        BridgeFactory bridgeChain2 = new BridgeFactory();
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        vm.deal(user, 2 ether);
+        bridgeChain1.lockNative{value: 1 ether}(2);
+        bridgeChain2.lockNative{value: 1 ether}(1);
+        vm.stopPrank();
+
+        uint256 amount = 1 ether;
+        address tokenZero = address(0);
+        (address relayerAddress, uint256 relayerKey) = makeAddrAndKey("relayer");
+        address bridgeChain1Address = address(bridgeChain1);
+        address bridgeChain2Address = address(bridgeChain2);
+
+        registerAndGrantRoles(bridgeChain1Address, tokenZero, relayerAddress);
+        registerAndGrantRoles(bridgeChain2Address, tokenZero, relayerAddress);
+
+        vm.deal(bridgeChain1Address, amount);
+        vm.deal(bridgeChain2Address, amount);
+
+        bytes memory signature = signClaimMessage(
+            user, tokenZero, amount, nonce, originalChainId, 1, bridgeChain1Address, relayerKey, deadline
+        );
+
+        makeClaim(bridgeChain1Address, user, tokenZero, amount, nonce, originalChainId, 1, deadline, signature);
+
+        vm.expectRevert(BridgeFactory.InvalidSignature.selector);
+        makeClaim(bridgeChain2Address, user, tokenZero, amount, nonce, originalChainId, 2, deadline, signature);
+    }
+
+    function testClaimWrappedWithSignatureRevertSignatureExpiration() public {
+        vm.startPrank(deployer);
+        vm.chainId(1);
+        BridgeFactory bridgeChain1 = new BridgeFactory();
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        vm.deal(user, 1 ether);
+        bridgeChain1.lockNative{value: 1 ether}(2);
+        vm.stopPrank();
+
+        uint256 amount = 1 ether;
+        address tokenZero = address(0);
+        (address relayerAddress, uint256 relayerKey) = makeAddrAndKey("relayer");
+        address bridgeChain1Address = address(bridgeChain1);
+
+        registerAndGrantRoles(bridgeChain1Address, tokenZero, relayerAddress);
+        vm.deal(bridgeChain1Address, amount);
+
+        bytes memory signature = signClaimMessage(
+            user, tokenZero, amount, nonce, originalChainId, 1, bridgeChain1Address, relayerKey, deadline
+        );
+
+        makeClaim(bridgeChain1Address, user, tokenZero, amount, nonce, originalChainId, 1, deadline, signature);
+        assertTrue(bridgeChain1.usedNonces(user, tokenZero, nonce, originalChainId));
+
+        uint256 newNonce = nonce + 1;
+        bytes memory signatureNewNonce = signClaimMessage(
+            user, tokenZero, amount, newNonce, originalChainId, 1, bridgeChain1Address, relayerKey, deadline
+        );
+
+        vm.warp(block.timestamp + 365 days);
+
+        vm.expectRevert(BridgeFactory.SignatureExpired.selector);
+        makeClaim(
+            bridgeChain1Address, user, tokenZero, amount, newNonce, originalChainId, 1, deadline, signatureNewNonce
+        );
+    }
+
+    function testClaimWrappedWithSignatureNotBurnNonce() public {
+        vm.startPrank(deployer);
+        vm.chainId(1);
+        BridgeFactory bridgeChain1 = new BridgeFactory();
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        vm.deal(user, 1 ether);
+        bridgeChain1.lockNative{value: 1 ether}(2);
+        vm.stopPrank();
+
+        uint256 amount = 1 ether;
+        address tokenZero = address(0);
+        (address relayerAddress, uint256 relayerKey) = makeAddrAndKey("relayer");
+        address bridgeChain1Address = address(bridgeChain1);
+
+        registerAndGrantRoles(bridgeChain1Address, tokenZero, relayerAddress);
+        vm.deal(bridgeChain1Address, amount);
+
+        uint256 skippedNonce = 5;
+        bytes memory sig = signClaimMessage(
+            user, tokenZero, amount, skippedNonce, originalChainId, 1, bridgeChain1Address, relayerKey, deadline
+        );
+
+        vm.prank(user);
+        vm.expectRevert(BridgeFactory.NonceNotYetAvailable.selector);
+        bridgeChain1.claimWrappedWithSignature(user, tokenZero, amount, skippedNonce, originalChainId, 1, deadline, sig);
+    }
+
+    function testClaimWrappedWithSignatureWithNonceIncrementMechanism() public {
+        vm.startPrank(deployer);
+        vm.chainId(1);
+        BridgeFactory bridgeChain1 = new BridgeFactory();
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        vm.deal(user, 1 ether);
+        bridgeChain1.lockNative{value: 1 ether}(2);
+        vm.stopPrank();
+
+        uint256 amount = 1 ether;
+        address tokenZero = address(0);
+        (address relayerAddress, uint256 relayerKey) = makeAddrAndKey("relayer");
+        address bridgeChain1Address = address(bridgeChain1);
+
+        registerAndGrantRoles(bridgeChain1Address, tokenZero, relayerAddress);
+        vm.deal(bridgeChain1Address, amount);
+
+        uint256 nonce0 = 0;
+        bytes memory sig1 = signClaimMessage(
+            user, tokenZero, amount, nonce0, originalChainId, 1, bridgeChain1Address, relayerKey, deadline
+        );
+        vm.prank(user);
+        bridgeChain1.claimWrappedWithSignature(user, tokenZero, amount, nonce0, originalChainId, 1, deadline, sig1);
+
+        bool used0 = bridgeChain1.usedNonces(user, tokenZero, nonce0, originalChainId);
+        assertTrue(used0);
+
+        vm.startPrank(user);
+        vm.deal(user, 1 ether);
+        bridgeChain1.lockNative{value: 1 ether}(2);
+        vm.stopPrank();
+
+        uint256 nonce1 = 1;
+        bytes memory sig3 = signClaimMessage(
+            user, tokenZero, amount, nonce1, originalChainId, 1, bridgeChain1Address, relayerKey, deadline
+        );
+        vm.prank(user);
+        bridgeChain1.claimWrappedWithSignature(user, tokenZero, amount, nonce1, originalChainId, 1, deadline, sig3);
+
+        bool used1 = bridgeChain1.usedNonces(user, tokenZero, nonce1, originalChainId);
+        assertTrue(used1);
+    }
+
+    function testGlobalNonceNoCollisionAcrossTokens() public {
+        vm.startPrank(deployer);
+        vm.chainId(1);
+        BridgeFactory bridgeChain1 = new BridgeFactory();
+        vm.stopPrank();
+
+        uint256 amount = 1 ether;
+        (address relayerAddress, uint256 relayerKey) = makeAddrAndKey("relayer");
+        address bridgeChain1Address = address(bridgeChain1);
+
+        MockERC20 tokenA = new MockERC20("TokenA", "TKA");
+        MockERC20 tokenB = new MockERC20("TokenB", "TKB");
+
+        registerAndGrantRoles(bridgeChain1Address, address(tokenA), relayerAddress);
+        registerAndGrantRoles(bridgeChain1Address, address(tokenB), relayerAddress);
+
+        vm.deal(bridgeChain1Address, amount);
+
+        tokenA.mint(user, amount);
+        vm.startPrank(user);
+        tokenA.approve(bridgeChain1Address, amount);
+        bridgeChain1.lockToken(address(tokenA), amount, 2);
+        vm.stopPrank();
+
+        tokenB.mint(user, amount);
+        vm.startPrank(user);
+        tokenB.approve(bridgeChain1Address, amount);
+        bridgeChain1.lockToken(address(tokenB), amount, 2);
+        vm.stopPrank();
+
+        bytes memory sigTokenA = signClaimMessage(
+            user, address(tokenA), amount, 0, originalChainId, 1, bridgeChain1Address, relayerKey, deadline
+        );
+        vm.prank(user);
+        bridgeChain1.claimWrappedWithSignature(
+            user, address(tokenA), amount, 0, originalChainId, 1, deadline, sigTokenA
+        );
+
+        bytes memory sigTokenB = signClaimMessage(
+            user, address(tokenB), amount, 0, originalChainId, 1, bridgeChain1Address, relayerKey, deadline
+        );
+        vm.prank(user);
+        bridgeChain1.claimWrappedWithSignature(
+            user, address(tokenB), amount, 0, originalChainId, 1, deadline, sigTokenB
+        );
+    }
+
+    function registerAndGrantRoles(address bridgeFactory_, address token_, address relayer_) internal {
+        WERC20 newWrappedNative = new WERC20("Wrapped Native", "wETH", 18);
+        BridgeFactory bridgeFactory = BridgeFactory(payable(bridgeFactory_));
+        newWrappedNative.grantRole(keccak256("BRIDGE_ROLE"), address(bridgeFactory));
+
+        vm.startPrank(deployer);
+        bridgeFactory.registerWrappedToken(token_, address(newWrappedNative));
+        bridgeFactory.grantRelayerRole(relayer_);
+        vm.stopPrank();
+    }
+
+    function signClaimMessage(
+        address user_,
+        address token_,
+        uint256 amount_,
+        uint256 nonce_,
+        uint256 originalChainId_,
+        uint256 targetChainId_,
+        address bridgeAddress_,
+        uint256 relayerPrivateKey_,
+        uint256 deadline_
+    ) internal pure returns (bytes memory) {
+        bytes32 message = keccak256(
+            abi.encodePacked(
+                user_, token_, amount_, nonce_, originalChainId_, targetChainId_, bridgeAddress_, deadline_
+            )
+        );
+        bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey_, signedMessage);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function makeClaim(
+        address bridgeFactoryAddress,
+        address user_,
+        address token_,
+        uint256 amount_,
+        uint256 nonce_,
+        uint256 originalChainId_,
+        uint256 claimChainId,
+        uint256 deadline_,
+        bytes memory signature
+    ) internal {
+        vm.prank(user_);
+        BridgeFactory(payable(bridgeFactoryAddress)).claimWrappedWithSignature(
+            user_, token_, amount_, nonce_, originalChainId_, claimChainId, deadline_, signature
+        );
     }
 }
