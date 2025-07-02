@@ -313,7 +313,6 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
         if (originalChainId == currentChainId) revert InvalidOriginalChain();
         if (claimChainId != currentChainId) revert InvalidTargetChain();
         if (block.timestamp > deadline) revert SignatureExpired();
-        if (nonce >= nonces[user][token]) revert NonceNotYetAvailable();
         if (usedNonces[user][token][nonce][originalChainId]) revert ClaimAlreadyProcessed();
 
         bytes32 message = keccak256(
@@ -368,7 +367,6 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
         if (claimChainId == 0) revert ZeroTargetChainNotAllowed();
         if (claimChainId != currentChainId) revert InvalidTargetChain();
         if (block.timestamp > deadline) revert SignatureExpired();
-        if (nonce >= nonces[user][token]) revert NonceNotYetAvailable();
         if (usedNonces[user][token][nonce][burnChainId]) revert ClaimAlreadyProcessed();
 
         bytes32 message =

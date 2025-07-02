@@ -487,29 +487,6 @@ contract BridgeFactoryTest is Test {
         );
     }
 
-    function testClaimWrappedWithSignatureRevertNonceNotYetAvailable() public {
-        (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
-
-        vm.prank(deployer);
-        bridge.grantRelayerRole(relayerAddr);
-
-        uint256 amount = 1 ether;
-        bytes32 message = keccak256(
-            abi.encodePacked(
-                user, address(token), amount, nonce, originalChainId, block.chainid, address(bridge), deadline
-            )
-        );
-        bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
-        bytes memory signature = abi.encodePacked(r, s, v);
-
-        vm.prank(user);
-        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.NonceNotYetAvailable.selector));
-        bridge.claimWrappedWithSignature(
-            user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
-        );
-    }
-
     function testClaimWrappedWithSignatureRevertNonceAlreadyUsed() public {
         testLockTokenTransfersSuccess();
         (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
@@ -781,33 +758,6 @@ contract BridgeFactoryTest is Test {
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(BridgeFactory.ClaimAlreadyProcessed.selector));
-        bridge.claimOriginalWithSignature(
-            user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
-        );
-    }
-
-    function testClaimOriginalWithSignatureRevertNonceNotYetAvailable() public {
-        (address relayerAddr, uint256 relayerPrivateKey) = makeAddrAndKey("relayer");
-
-        vm.prank(deployer);
-        bridge.grantRelayerRole(relayerAddr);
-
-        uint256 amount = 1 ether;
-
-        bytes32 message = keccak256(
-            abi.encodePacked(
-                user, address(token), amount, nonce, originalChainId, block.chainid, address(bridge), deadline
-            )
-        );
-        bytes32 signedMessage = MessageHashUtils.toEthSignedMessageHash(message);
-
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(relayerPrivateKey, signedMessage);
-        bytes memory signature = abi.encodePacked(r, s, v);
-
-        token.mint(address(bridge), amount);
-
-        vm.prank(user);
-        vm.expectRevert(abi.encodeWithSelector(BridgeFactory.NonceNotYetAvailable.selector));
         bridge.claimOriginalWithSignature(
             user, address(token), amount, nonce, originalChainId, block.chainid, deadline, signature
         );
@@ -1144,11 +1094,11 @@ contract BridgeFactoryTest is Test {
 
         uint256 skippedNonce = 5;
         bytes memory sig = signClaimMessage(
-            user, tokenZero, amount, skippedNonce, originalChainId, 1, bridgeChain1Address, relayerKey, deadline
+            user, tokenZero, amount, nonce, originalChainId, 1, bridgeChain1Address, relayerKey, deadline
         );
 
         vm.prank(user);
-        vm.expectRevert(BridgeFactory.NonceNotYetAvailable.selector);
+        vm.expectRevert(BridgeFactory.InvalidSignature.selector);
         bridgeChain1.claimWrappedWithSignature(user, tokenZero, amount, skippedNonce, originalChainId, 1, deadline, sig);
     }
 
@@ -1242,6 +1192,11 @@ contract BridgeFactoryTest is Test {
         bridgeChain1.claimWrappedWithSignature(
             user, address(tokenB), amount, 0, originalChainId, 1, deadline, sigTokenB
         );
+
+        uint256 nonceTokenA = bridgeChain1.nonces(user, address(tokenA));
+        uint256 nonceTokenB = bridgeChain1.nonces(user, address(tokenB));
+
+        assertEq(nonceTokenA, nonceTokenB);
     }
 
     function registerAndGrantRoles(address bridgeFactory_, address token_, address relayer_) internal {
