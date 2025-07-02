@@ -137,9 +137,6 @@ contract BridgeFactory is AccessControl, ReentrancyGuard, Pausable {
     /// @notice Reverts if bridge factory has smaller balance than wanted amount
     error InsufficientBalance(uint256 balance, uint256 amount);
 
-    /// @notice Reverts when a claim attempts to use a nonce that has not been issued (i.e., nonce is greater than or equal to the current user nonce)
-    error NonceNotYetAvailable();
-
     /// @notice Role identifier for relayer accounts authorized to sign claims
     bytes32 public constant RELAYER_ROLE = keccak256("RELAYER_ROLE");
 
